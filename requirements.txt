@@ -1,5 +1,7 @@
 streamlit
+pandas
 openai
 chromadb
 python-docx
+pypdf
 requests
