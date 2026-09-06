@@ -1,9 +1,11 @@
 """シンプルな RAG チャットアプリ (ChromaDB + Streamlit + Ollama)"""
 
 import streamlit as st
+import pandas as pd
 from openai import OpenAI
 import chromadb
 from docx import Document
+from pypdf import PdfReader
 import requests
 
 # ---------------- 設定 ----------------
@@ -20,7 +22,11 @@ CHUNK_OVERLAP = 50
 @st.cache_resource
 def get_collection():
     client = chromadb.PersistentClient(path=DB_DIR)
-    return client.get_or_create_collection(name=COLLECTION_NAME)
+    # cosine距離にしておくと 1 - distance がそのまま類似度スコアになる
+    return client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+    )
 
 
 collection = get_collection()
@@ -40,8 +46,12 @@ def ollama_embed(text):
 
 def load_document(file):
     """アップロードされたファイルからテキストを取り出す"""
-    if file.name.lower().endswith(".docx"):
+    name = file.name.lower()
+    if name.endswith(".docx"):
         return "\n".join(p.text for p in Document(file).paragraphs)
+    if name.endswith(".pdf"):
+        reader = PdfReader(file)
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
     return file.read().decode("utf-8", errors="ignore")
 
 
@@ -74,8 +84,8 @@ st.sidebar.subheader("ナレッジベース")
 st.sidebar.caption(f"登録済みチャンク数: {collection.count()}")
 
 uploaded_files = st.sidebar.file_uploader(
-    "ファイルをアップロード (.docx / .txt / .md)",
-    type=["docx", "txt", "md"],
+    "ファイルをアップロード (.docx / .pdf / .txt / .md)",
+    type=["docx", "pdf", "txt", "md"],
     accept_multiple_files=True,
 )
 
@@ -132,7 +142,7 @@ if prompt:
         st.write(prompt)
 
     # --- 検索 (RAG) ---
-    docs, metas = [], []
+    docs, metas, similarities = [], [], []
     if collection.count() > 0:
         results = collection.query(
             query_embeddings=[ollama_embed(prompt)],
@@ -140,6 +150,8 @@ if prompt:
         )
         docs = results["documents"][0]
         metas = results["metadatas"][0]
+        # cosine距離 → 類似度 (1に近いほど類似)
+        similarities = [1 - d for d in results["distances"][0]]
 
     if docs:
         context_text = "\n\n".join(f"[{i + 1}] {d}" for i, d in enumerate(docs))
@@ -177,8 +189,15 @@ if prompt:
 
         if docs:
             with st.expander(f"参照ドキュメント ({len(docs)}件)"):
-                for i, (d, m) in enumerate(zip(docs, metas), start=1):
-                    st.markdown(f"**[{i}] {m.get('source', '?')}**")
+                labels = [f"[{i}] {m.get('source', '?')} #{m.get('chunk', '?')}"
+                          for i, m in enumerate(metas, start=1)]
+
+                st.subheader("類似度グラフ")
+                sim_df = pd.DataFrame({"類似度": similarities}, index=labels)
+                st.bar_chart(sim_df)
+
+                for label, d, sim in zip(labels, docs, similarities):
+                    st.markdown(f"**{label}**（類似度: {sim:.3f}）")
                     st.caption(d)
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
